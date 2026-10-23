@@ -176,6 +176,25 @@ Validation Error: %s
 						return fmt.Errorf("checking CRD for potential data loss updating %q: %w", step.Resource.Name, err)
 					}
 
+					// If the bundle's conversion spec has been stripped (nil or None — the
+					// OCPBUGS-106160 fix removes it to avoid calling an unconfigured webhook
+					// during preflight validation) but the live CRD already has an active
+					// conversion webhook, preserve the live webhook config for this write.
+					// This prevents a gap where the storage version is promoted while
+					// conversion is None, which allows the old operator's writes to be
+					// validated against the new schema and have renamed fields pruned silently.
+					// olm-operator will replace this with the new operator's webhook config
+					// in a subsequent write once the new pods are running.
+					// If the live CRD has no webhook (conversion=None or nil), this is a
+					// no-op and behavior is unchanged.
+					if (crd.Spec.Conversion == nil || crd.Spec.Conversion.Strategy == "" || crd.Spec.Conversion.Strategy == apiextensionsv1.NoneConverter) &&
+						currentCRD.Spec.Conversion != nil &&
+						currentCRD.Spec.Conversion.Strategy == apiextensionsv1.WebhookConverter {
+						crd.Spec.Conversion = currentCRD.Spec.Conversion.DeepCopy()
+						b.logger.Infof("preserving live conversion webhook on %q: new operator webhook will be wired by olm-operator once pods are ready",
+							step.Resource.Name)
+					}
+
 					// Update CRD to new version
 					setInstalledAlongsideAnnotation(b.annotator, crd, b.plan.GetNamespace(), step.Resolving, b.csvLister, crd, currentCRD)
 					_, err = client.CustomResourceDefinitions().Update(context.TODO(), crd, metav1.UpdateOptions{})
